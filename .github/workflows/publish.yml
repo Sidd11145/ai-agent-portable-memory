@@ -21,7 +21,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install build tools
-        run: pip install build twine toml
+        run: pip install build twine toml pytest
+
+      - name: Install package and run tests
+        run: |
+          pip install -e .
+          pytest tests/ -v
 
       - name: Bump patch version
         id: bump
