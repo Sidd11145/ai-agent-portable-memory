@@ -54,9 +54,10 @@ def test_parse_summary_contains_full_body():
     assert "## Next steps" in result.summary
 
 
-def test_parse_missing_title_defaults():
-    result = _parse_response("## Project\ndefault\n## Tags\npython")
-    assert result.title == "Untitled Session"
+def test_parse_missing_title_raises():
+    import pytest
+    with pytest.raises(ValueError, match="no ## Title section"):
+        _parse_response("## Project\ndefault\n## Tags\npython")
 
 
 def test_parse_missing_project_defaults():
