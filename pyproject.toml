@@ -27,6 +27,7 @@ all = [
     "boto3>=1.34",
     "firebase-admin>=6.0",
 ]
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 memory = "memory.cli:cli"
@@ -34,3 +35,6 @@ memory = "memory.cli:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["memory*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
