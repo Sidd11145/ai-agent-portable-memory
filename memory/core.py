@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from datetime import datetime
@@ -9,6 +10,70 @@ from dotenv import load_dotenv
 from .backends.base import BaseBackend, Session
 
 load_dotenv()
+
+_ACTIVE_SESSION_FILE = Path.home() / ".ai-memory" / "active_session"
+_CLAUDE_SESSION_MAP_FILE = Path.home() / ".ai-memory" / "claude_sessions.json"
+_STOPPED_FILE = Path.home() / ".ai-memory" / "STOPPED"
+
+
+def is_stopped() -> bool:
+    return _STOPPED_FILE.exists()
+
+
+def set_stopped(stopped: bool) -> None:
+    _STOPPED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if stopped:
+        _STOPPED_FILE.write_text("stopped")
+    else:
+        _STOPPED_FILE.unlink(missing_ok=True)
+
+
+def get_active_session_id() -> Optional[str]:
+    if _ACTIVE_SESSION_FILE.exists():
+        sid = _ACTIVE_SESSION_FILE.read_text().strip()
+        return sid or None
+    return None
+
+
+def set_active_session_id(session_id: Optional[str]) -> None:
+    _ACTIVE_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if session_id is None:
+        _ACTIVE_SESSION_FILE.unlink(missing_ok=True)
+    else:
+        _ACTIVE_SESSION_FILE.write_text(session_id)
+
+
+def _load_claude_session_map() -> dict:
+    if _CLAUDE_SESSION_MAP_FILE.exists():
+        try:
+            return json.loads(_CLAUDE_SESSION_MAP_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_claude_session_map(mapping: dict) -> None:
+    _CLAUDE_SESSION_MAP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _CLAUDE_SESSION_MAP_FILE.write_text(json.dumps(mapping))
+
+
+def get_memory_session_for_claude(claude_session_id: str) -> Optional[str]:
+    """Return the memory session ID currently mapped to this Claude session, if any."""
+    return _load_claude_session_map().get(claude_session_id)
+
+
+def set_memory_session_for_claude(claude_session_id: str, memory_session_id: str) -> None:
+    """Map a Claude session ID to a memory session ID."""
+    mapping = _load_claude_session_map()
+    mapping[claude_session_id] = memory_session_id
+    _save_claude_session_map(mapping)
+
+
+def clear_memory_session_for_claude(claude_session_id: str) -> None:
+    """Remove the mapping for a Claude session (called when the session ends)."""
+    mapping = _load_claude_session_map()
+    mapping.pop(claude_session_id, None)
+    _save_claude_session_map(mapping)
 
 
 def get_backend() -> BaseBackend:
@@ -49,11 +114,24 @@ def _require_env(key: str) -> str:
     return val
 
 
-def create_session(title: str, project: str, summary: str, tags: list[str]) -> Session:
+def create_session(title: str, project: str, summary: str, tags: list[str],
+                   session_id: Optional[str] = None) -> Session:
+    if is_stopped():
+        raise RuntimeError("Memory is stopped. Run 'memory start' to re-enable.")
     backend = get_backend()
     backend.init()
+    if session_id:
+        existing = backend.get(session_id)
+        if existing:
+            existing.title = title
+            existing.project = project
+            existing.summary = summary
+            existing.tags = tags
+            backend.save(existing)
+            set_active_session_id(existing.id)
+            return existing
     session = Session(
-        id=str(uuid.uuid4()),
+        id=session_id or str(uuid.uuid4()),
         project=project,
         title=title,
         summary=summary,
@@ -62,6 +140,7 @@ def create_session(title: str, project: str, summary: str, tags: list[str]) -> S
         updated_at=datetime.utcnow(),
     )
     backend.save(session)
+    set_active_session_id(session.id)
     return session
 
 
@@ -72,6 +151,8 @@ def list_sessions(project: Optional[str] = None) -> list[Session]:
 
 
 def load_session(session_id: str) -> Optional[Session]:
+    if is_stopped():
+        raise RuntimeError("Memory is stopped. Run 'memory start' to re-enable.")
     backend = get_backend()
     backend.init()
     return backend.get(session_id)
