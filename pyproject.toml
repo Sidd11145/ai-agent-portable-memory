@@ -7,12 +7,16 @@ name = "ai-agent-portable-memory"
 version = "0.1.1"
 description = "Portable compressed memory for AI agents — works with any LLM"
 readme = "README.md"
-requires-python = ">=3.10"
-keywords = [ "ai", "memory", "llm", "chatgpt", "claude", "portable",]
-dependencies = [ "click>=8.1", "rich>=13.0", "openai>=1.0", "anthropic>=0.25", "python-dotenv>=1.0",]
-
-[project.license]
-text = "MIT"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["ai", "memory", "llm", "chatgpt", "claude", "portable"]
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "openai>=1.0",
+    "anthropic>=0.25",
+    "python-dotenv>=1.0",
+]
 
 [project.optional-dependencies]
 supabase = ["supabase>=2.0"]
