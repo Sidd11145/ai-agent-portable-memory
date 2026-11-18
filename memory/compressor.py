@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from typing import Optional
@@ -48,17 +50,28 @@ def compress(transcript: str, provider: str = "openai", model: Optional[str] = N
     """
     Compress a raw chat transcript into a structured session summary.
 
-    provider: "openai" | "anthropic" | "groq"
+    provider: openai | anthropic | groq | gemini | grok | mistral | ollama | deepseek
     model: optional override (defaults to a sensible cheap model per provider)
     """
-    if provider == "openai":
-        return _compress_openai(transcript, model or "gpt-4o-mini")
-    elif provider == "anthropic":
-        return _compress_anthropic(transcript, model or "claude-haiku-4-5-20251001")
-    elif provider == "groq":
-        return _compress_groq(transcript, model or "llama-3.1-8b-instant")
-    else:
-        raise ValueError(f"Unknown provider: {provider}. Choose: openai, anthropic, groq")
+    providers = {
+        "openai":    (_compress_openai,    "gpt-4o-mini"),
+        "anthropic": (_compress_anthropic, "claude-haiku-4-5-20251001"),
+        "groq":      (_compress_groq,      "llama-3.1-8b-instant"),
+        "gemini":    (_compress_gemini,    "gemini-2.0-flash"),
+        "grok":      (_compress_grok,      "grok-2"),
+        "mistral":   (_compress_mistral,   "mistral-small-latest"),
+        "ollama":    (_compress_ollama,    "llama3.2"),
+        "deepseek":  (_compress_deepseek,  "deepseek-chat"),
+    }
+
+    if provider not in providers:
+        raise ValueError(
+            f"Unknown provider: {provider}. "
+            f"Choose: {', '.join(providers)}"
+        )
+
+    fn, default_model = providers[provider]
+    return fn(transcript, model or default_model)
 
 
 def _parse_response(text: str) -> CompressedSummary:
@@ -79,6 +92,15 @@ def _parse_response(text: str) -> CompressedSummary:
     return CompressedSummary(title=title, project=project, summary=text.strip(), tags=tags)
 
 
+def _messages(transcript: str) -> list[dict]:
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Compress this transcript:\n\n{transcript}"},
+    ]
+
+
+# ── OpenAI ────────────────────────────────────────────────────────────────────
+
 def _compress_openai(transcript: str, model: str) -> CompressedSummary:
     try:
         from openai import OpenAI
@@ -92,14 +114,13 @@ def _compress_openai(transcript: str, model: str) -> CompressedSummary:
     client = OpenAI(api_key=api_key)
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Compress this transcript:\n\n{transcript}"},
-        ],
+        messages=_messages(transcript),
         temperature=0.2,
     )
     return _parse_response(resp.choices[0].message.content)
 
+
+# ── Anthropic ─────────────────────────────────────────────────────────────────
 
 def _compress_anthropic(transcript: str, model: str) -> CompressedSummary:
     try:
@@ -121,6 +142,8 @@ def _compress_anthropic(transcript: str, model: str) -> CompressedSummary:
     return _parse_response(resp.content[0].text)
 
 
+# ── Groq ──────────────────────────────────────────────────────────────────────
+
 def _compress_groq(transcript: str, model: str) -> CompressedSummary:
     try:
         from groq import Groq
@@ -134,10 +157,118 @@ def _compress_groq(transcript: str, model: str) -> CompressedSummary:
     client = Groq(api_key=api_key)
     resp = client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Compress this transcript:\n\n{transcript}"},
-        ],
+        messages=_messages(transcript),
+        temperature=0.2,
+    )
+    return _parse_response(resp.choices[0].message.content)
+
+
+# ── Gemini ────────────────────────────────────────────────────────────────────
+
+def _compress_gemini(transcript: str, model: str) -> CompressedSummary:
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        raise ImportError("Run: pip install google-generativeai")
+
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise EnvironmentError("GEMINI_API_KEY or GOOGLE_API_KEY not set")
+
+    genai.configure(api_key=api_key)
+    gemini = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=SYSTEM_PROMPT,
+    )
+    resp = gemini.generate_content(
+        f"Compress this transcript:\n\n{transcript}",
+        generation_config={"temperature": 0.2},
+    )
+    return _parse_response(resp.text)
+
+
+# ── Grok (xAI) ────────────────────────────────────────────────────────────────
+
+def _compress_grok(transcript: str, model: str) -> CompressedSummary:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError("Run: pip install openai")
+
+    api_key = os.environ.get("XAI_API_KEY") or os.environ.get("GROK_API_KEY")
+    if not api_key:
+        raise EnvironmentError("XAI_API_KEY or GROK_API_KEY not set")
+
+    client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+    resp = client.chat.completions.create(
+        model=model,
+        messages=_messages(transcript),
+        temperature=0.2,
+    )
+    return _parse_response(resp.choices[0].message.content)
+
+
+# ── Mistral ───────────────────────────────────────────────────────────────────
+
+def _compress_mistral(transcript: str, model: str) -> CompressedSummary:
+    try:
+        from mistralai import Mistral
+    except ImportError:
+        raise ImportError("Run: pip install mistralai")
+
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        raise EnvironmentError("MISTRAL_API_KEY not set")
+
+    client = Mistral(api_key=api_key)
+    resp = client.chat.complete(
+        model=model,
+        messages=_messages(transcript),
+        temperature=0.2,
+    )
+    return _parse_response(resp.choices[0].message.content)
+
+
+# ── Ollama (local) ────────────────────────────────────────────────────────────
+
+def _compress_ollama(transcript: str, model: str) -> CompressedSummary:
+    try:
+        import requests
+    except ImportError:
+        raise ImportError("Run: pip install requests")
+
+    base_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    resp = requests.post(
+        f"{base_url}/api/chat",
+        json={
+            "model": model,
+            "messages": _messages(transcript),
+            "stream": False,
+            "options": {"temperature": 0.2},
+        },
+        timeout=120,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Ollama error {resp.status_code}: {resp.text}")
+    return _parse_response(resp.json()["message"]["content"])
+
+
+# ── DeepSeek ──────────────────────────────────────────────────────────────────
+
+def _compress_deepseek(transcript: str, model: str) -> CompressedSummary:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError("Run: pip install openai")
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise EnvironmentError("DEEPSEEK_API_KEY not set")
+
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
+    resp = client.chat.completions.create(
+        model=model,
+        messages=_messages(transcript),
         temperature=0.2,
     )
     return _parse_response(resp.choices[0].message.content)
