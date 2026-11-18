@@ -214,6 +214,47 @@ FIREBASE_PROJECT_ID=my-firebase-project
 
 ---
 
+## Auto-Save Claude Code Sessions (Optional)
+
+Run once after installing:
+
+```bash
+memory setup --claude-hook       # save on session exit
+memory setup --compact-hook      # save on context compaction (recommended)
+```
+
+**`--claude-hook`** saves when you exit Claude Code.
+
+**`--compact-hook`** saves automatically whenever Claude Code compacts the context (when the conversation gets long). This acts as a natural mid-session checkpoint — you never lose progress even in very long sessions.
+
+Use both together for full coverage:
+```bash
+memory setup --claude-hook
+memory setup --compact-hook
+```
+
+To disable:
+```bash
+memory setup --remove-claude-hook
+memory setup --remove-compact-hook
+```
+
+---
+
+## Save from Any AI Tool
+
+```bash
+memory save                          Paste transcript manually
+memory save --from-claude            Auto-read last Claude Code session
+memory save --from-chatgpt           Auto-read ChatGPT export (conversations.json)
+memory save --from-cursor            Auto-read last Cursor session
+memory save --from-windsurf          Auto-read last Windsurf session
+memory save --from-file chat.txt     Read from any plain text or JSON file
+memory save --from-claude --session <id>  Specific session by ID
+```
+
+---
+
 ## CLI Reference
 
 ```
@@ -232,6 +273,11 @@ memory search <query>            Search sessions by keyword
 memory search auth --project api Filter search by project
 
 memory delete <id>               Delete a session
+
+memory setup --claude-hook         Auto-save on session exit
+memory setup --compact-hook        Auto-save on context compaction
+memory setup --remove-claude-hook  Disable exit auto-save
+memory setup --remove-compact-hook Disable compaction auto-save
 
 memory config                    Show current configuration
 ```

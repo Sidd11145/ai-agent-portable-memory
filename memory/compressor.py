@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -30,12 +31,36 @@ Output ONLY the following markdown format — no extra commentary:
 <numbered list of what to do next>
 
 ## Important context
-<any critical technical details: stack, versions, ports, credentials structure, constraints — things a new AI needs to know to continue>
+<critical technical details: stack, versions, ports, config structure, constraints — things a new AI needs to know to continue>
+IMPORTANT: Never include actual values for secrets, tokens, API keys, passwords, or credentials. Describe their names/structure only (e.g. "ANTHROPIC_API_KEY is required" not the actual key value).
 
 ## Tags
 <comma-separated keywords for searching, e.g.: react, auth, jwt, python>
 
 Be concise. The goal is maximum information density with minimum tokens."""
+
+
+# Patterns that should never appear in stored summaries
+_SECRET_PATTERNS = [
+    # Anthropic API keys (sk-ant-api03-...) — full or LLM-truncated (sk-ant-...)
+    (re.compile(r'sk-ant-[A-Za-z0-9_\-\.]{3,}'), '[ANTHROPIC_API_KEY]'),
+    # OpenAI API keys (sk-... or sk-proj-...)
+    (re.compile(r'sk-(?:proj-)?[A-Za-z0-9_\-\.]{3,}'), '[OPENAI_API_KEY]'),
+    # Groq keys
+    (re.compile(r'gsk_[A-Za-z0-9\.]{3,}'), '[GROQ_API_KEY]'),
+    # UUID-like tokens: full (8-4-4-4-12) and LLM-truncated forms (bf517899-...)
+    # Requires at least one hyphen segment so bare 8-char commit hashes don't match.
+    (re.compile(r'(?<![A-Za-z0-9])[0-9a-f]{8}-(?:[0-9a-f]{1,4}-?|\.\.\.)+(?![A-Za-z0-9-])'), '[TOKEN]'),
+    # Generic "key = <value>" patterns with long random-looking values
+    (re.compile(r'(?i)(api[_-]?key|auth[_-]?token|secret|password|bearer)\s*[=:]\s*["\']?([A-Za-z0-9_\-\.]{8,})["\']?'), r'\1=[REDACTED]'),
+]
+
+
+def scrub_secrets(text: str) -> str:
+    """Remove known secret patterns from text before storing."""
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 @dataclass
@@ -71,23 +96,31 @@ def compress(transcript: str, provider: str = "openai", model: Optional[str] = N
         )
 
     fn, default_model = providers[provider]
-    return fn(transcript, model or default_model)
+    result = fn(scrub_secrets(transcript), model or default_model)
+    result.summary = scrub_secrets(result.summary)
+    return result
 
 
 def _parse_response(text: str) -> CompressedSummary:
     lines = text.strip().splitlines()
-    title = "Untitled Session"
+    title = ""
     project = "default"
     tags: list[str] = []
 
     for i, line in enumerate(lines):
         if line.startswith("## Title"):
-            title = lines[i + 1].strip() if i + 1 < len(lines) else title
+            title = lines[i + 1].strip() if i + 1 < len(lines) else ""
         elif line.startswith("## Project"):
             project = lines[i + 1].strip() if i + 1 < len(lines) else project
         elif line.startswith("## Tags"):
             raw = lines[i + 1].strip() if i + 1 < len(lines) else ""
             tags = [t.strip() for t in raw.split(",") if t.strip()]
+
+    if not title:
+        raise ValueError(
+            "LLM did not return a structured summary (no ## Title section). "
+            "The transcript may be too short or not a valid chat conversation."
+        )
 
     return CompressedSummary(title=title, project=project, summary=text.strip(), tags=tags)
 
@@ -128,11 +161,20 @@ def _compress_anthropic(transcript: str, model: str) -> CompressedSummary:
     except ImportError:
         raise ImportError("Run: pip install anthropic")
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
     if not api_key:
         raise EnvironmentError("ANTHROPIC_API_KEY not set")
 
-    client = anthropic.Anthropic(api_key=api_key)
+    base_url = os.environ.get("ANTHROPIC_BASE_URL")
+
+    if base_url:
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+        )
+    else:
+        client = anthropic.Anthropic(api_key=api_key)
+
     resp = client.messages.create(
         model=model,
         max_tokens=1024,
