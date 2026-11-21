@@ -18,6 +18,7 @@ class SupabaseBackend(BaseBackend):
             title       TEXT NOT NULL,
             summary     TEXT NOT NULL,
             tags        JSONB NOT NULL DEFAULT '[]',
+            model       TEXT NOT NULL DEFAULT '',
             created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
         );
@@ -41,6 +42,7 @@ class SupabaseBackend(BaseBackend):
             title=row["title"],
             summary=row["summary"],
             tags=row["tags"] if isinstance(row["tags"], list) else json.loads(row["tags"]),
+            model=row.get("model", ""),
             created_at=datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")),
             updated_at=datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00")),
         )
@@ -55,6 +57,7 @@ class SupabaseBackend(BaseBackend):
             "title": session.title,
             "summary": session.summary,
             "tags": session.tags,
+            "model": session.model,
             "updated_at": now,
         }
         self.client.table("sessions").upsert(data).execute()

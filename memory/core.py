@@ -14,6 +14,7 @@ load_dotenv()
 _ACTIVE_SESSION_FILE = Path.home() / ".ai-memory" / "active_session"
 _CLAUDE_SESSION_MAP_FILE = Path.home() / ".ai-memory" / "claude_sessions.json"
 _STOPPED_FILE = Path.home() / ".ai-memory" / "STOPPED"
+_ENABLED_FILE = Path.home() / ".ai-memory" / "enabled.json"
 
 
 def is_stopped() -> bool:
@@ -26,6 +27,63 @@ def set_stopped(stopped: bool) -> None:
         _STOPPED_FILE.write_text("stopped")
     else:
         _STOPPED_FILE.unlink(missing_ok=True)
+
+
+# ── Per-(project + agent) recording opt-in ─────────────────────────────────────
+# enabled.json shape: { "<resolved_cwd>": ["claude", "codex"], ... }
+# Recording is OFF by default; a (directory, agent) pair must be explicitly
+# enabled via `memory start`. This keeps every project/tab independent.
+
+def _resolve_key(cwd) -> str:
+    return str(Path(cwd).resolve())
+
+
+def _load_enabled() -> dict:
+    if _ENABLED_FILE.exists():
+        try:
+            data = json.loads(_ENABLED_FILE.read_text())
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_enabled(data: dict) -> None:
+    _ENABLED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _ENABLED_FILE.write_text(json.dumps(data, indent=2))
+
+
+def is_recording(cwd, agent: str) -> bool:
+    """True only if (resolved cwd, agent) was explicitly enabled and not globally stopped."""
+    if is_stopped():  # global kill-switch always wins
+        return False
+    return agent in _load_enabled().get(_resolve_key(cwd), [])
+
+
+def enable_recording(cwd, agent: str) -> None:
+    data = _load_enabled()
+    key = _resolve_key(cwd)
+    agents = data.get(key, [])
+    if agent not in agents:
+        agents.append(agent)
+    data[key] = agents
+    _save_enabled(data)
+
+
+def disable_recording(cwd, agent: str) -> None:
+    data = _load_enabled()
+    key = _resolve_key(cwd)
+    agents = [a for a in data.get(key, []) if a != agent]
+    if agents:
+        data[key] = agents
+    else:
+        data.pop(key, None)
+    _save_enabled(data)
+
+
+def recording_agents(cwd) -> list[str]:
+    """Agents currently enabled to record in this directory."""
+    return list(_load_enabled().get(_resolve_key(cwd), []))
 
 
 def get_active_session_id() -> Optional[str]:
@@ -76,8 +134,13 @@ def clear_memory_session_for_claude(claude_session_id: str) -> None:
     _save_claude_session_map(mapping)
 
 
-def get_backend() -> BaseBackend:
-    backend_type = os.environ.get("MEMORY_BACKEND", "sqlite").lower()
+def clear_all_claude_session_mappings() -> None:
+    """Wipe the entire Claude session → memory session map (called on memory use clear)."""
+    _save_claude_session_map({})
+
+
+def get_backend(backend_override: Optional[str] = None) -> BaseBackend:
+    backend_type = (backend_override or os.environ.get("MEMORY_BACKEND", "sqlite")).lower()
 
     if backend_type == "sqlite":
         from .backends.sqlite import SQLiteBackend
@@ -115,10 +178,11 @@ def _require_env(key: str) -> str:
 
 
 def create_session(title: str, project: str, summary: str, tags: list[str],
-                   session_id: Optional[str] = None) -> Session:
+                   session_id: Optional[str] = None, model: Optional[str] = None,
+                   backend_override: Optional[str] = None) -> Session:
     if is_stopped():
         raise RuntimeError("Memory is stopped. Run 'memory start' to re-enable.")
-    backend = get_backend()
+    backend = get_backend(backend_override)
     backend.init()
     if session_id:
         existing = backend.get(session_id)
@@ -127,6 +191,8 @@ def create_session(title: str, project: str, summary: str, tags: list[str],
             existing.project = project
             existing.summary = summary
             existing.tags = tags
+            if model:
+                existing.model = model
             backend.save(existing)
             set_active_session_id(existing.id)
             return existing
@@ -136,6 +202,7 @@ def create_session(title: str, project: str, summary: str, tags: list[str],
         title=title,
         summary=summary,
         tags=tags,
+        model=model or "",
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )

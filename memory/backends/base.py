@@ -15,6 +15,7 @@ class Session:
     created_at: datetime
     updated_at: datetime
     tags: list[str] = field(default_factory=list)
+    model: str = ""
 
 
 class BaseBackend(ABC):

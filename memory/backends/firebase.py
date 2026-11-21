@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from .base import BaseBackend, Session
 
@@ -42,6 +42,7 @@ class FirebaseBackend(BaseBackend):
             title=d["title"],
             summary=d["summary"],
             tags=d.get("tags", []),
+            model=d.get("model", ""),
             created_at=d["created_at"],
             updated_at=d["updated_at"],
         )
@@ -55,6 +56,7 @@ class FirebaseBackend(BaseBackend):
             "title": session.title,
             "summary": session.summary,
             "tags": session.tags,
+            "model": session.model,
             "created_at": session.created_at or now,
             "updated_at": now,
         }
@@ -64,13 +66,13 @@ class FirebaseBackend(BaseBackend):
         doc = self.col.document(session_id).get()
         return self._doc_to_session(doc) if doc.exists else None
 
-    def list(self, project: Optional[str] = None) -> list[Session]:
+    def list(self, project: Optional[str] = None) -> List[Session]:
         q = self.col.order_by("updated_at", direction="DESCENDING")
         if project:
             q = q.where("project", "==", project)
         return [self._doc_to_session(d) for d in q.stream()]
 
-    def search(self, query: str, project: Optional[str] = None) -> list[Session]:
+    def search(self, query: str, project: Optional[str] = None) -> List[Session]:
         # Firestore has no full-text search — client-side filter on loaded docs
         query_lower = query.lower()
         return [

@@ -95,3 +95,46 @@ def test_empty_tags(backend):
     backend.save(s)
     result = backend.get("abc123")
     assert result.tags == []
+
+
+def test_model_roundtrip(backend):
+    s = make_session(model="claude-sonnet-4-6")
+    backend.save(s)
+    result = backend.get("abc123")
+    assert result.model == "claude-sonnet-4-6"
+
+
+def test_model_defaults_empty(backend):
+    s = make_session()
+    backend.save(s)
+    assert backend.get("abc123").model == ""
+
+
+def test_migration_adds_model_column_to_old_db(tmp_path):
+    """A DB created before the model column must gain it via init() without data loss."""
+    import sqlite3
+
+    db_path = tmp_path / "old.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, project TEXT NOT NULL DEFAULT 'default',
+            title TEXT NOT NULL, summary TEXT NOT NULL,
+            tags TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )
+    """)
+    now = datetime.utcnow().isoformat()
+    conn.execute(
+        "INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
+        ("legacy", "proj", "Legacy", "## Title\nLegacy", "[]", now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    backend = SQLiteBackend(db_path=db_path)
+    backend.init()  # should ALTER TABLE ADD COLUMN model
+    result = backend.get("legacy")
+    assert result is not None
+    assert result.title == "Legacy"
+    assert result.model == ""  # default on migrated rows

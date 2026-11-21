@@ -1,8 +1,10 @@
 # AI Agent Portable Memory
 
-> Carry your context across any AI — ChatGPT, Claude, Gemini, Grok, or any LLM.
+> One install. Any AI agent. Memory that follows you everywhere.
 
-Instead of losing your work every time you switch AI tools or start a new chat, **AI Agent Portable Memory** lets you save compact, structured session summaries and load them instantly into any AI conversation.
+Install once, set one API key, and your context is automatically saved and restored — across **Claude Code, GitHub Copilot CLI, Codex, Cursor, Windsurf**, or any agent that uses the Claude Code hook protocol.
+
+No per-agent config. No separate commands per tool. One unified memory store.
 
 ---
 
@@ -18,10 +20,10 @@ Copy-pasting raw chat logs wastes too many context tokens and is unmanageable.
 ## The Solution
 
 A portable memory store that:
-1. **Compresses** your session into a structured, token-efficient summary using an LLM
-2. **Lets you review and edit** the summary before saving
+1. **Auto-detects** which agent is running (Claude, Copilot, Codex, Cursor…)
+2. **Compresses** your session into a structured, token-efficient summary using an LLM
 3. **Stores it** locally (SQLite) or in the cloud (Supabase, S3/R2, Firebase)
-4. **Loads it** as a clean context block you paste into any AI
+4. **Injects it** automatically at the start of your next session in any agent
 
 ---
 
@@ -31,13 +33,20 @@ A portable memory store that:
 pip install ai-agent-portable-memory
 ```
 
-Or from source:
+Then install hooks and set one API key — that's it:
 
 ```bash
-git clone https://github.com/your-username/AI-Agent-Portable-Memory
-cd AI-Agent-Portable-Memory
-pip install -e .
+memory install                        # hooks every agent on this machine
+
+export ANTHROPIC_API_KEY=sk-ant-...   # Claude / Sonnet (auto-detected)
+# OR
+export OPENAI_API_KEY=sk-...          # GPT models
+# OR
+export GROQ_API_KEY=gsk_...           # Groq (free tier)
+# Ollama needs no key — runs locally
 ```
+
+Restart your AI agent. Memory is now live for **all agents** automatically.
 
 For cloud storage backends:
 
@@ -52,17 +61,17 @@ pip install "ai-agent-portable-memory[all]"        # Everything
 
 ## Quick Start
 
-### 1. Set your LLM API key
+### 1. Install hooks and set one API key
 
 ```bash
-export OPENAI_API_KEY=sk-...          # OpenAI (default)
-# or
-export ANTHROPIC_API_KEY=sk-ant-...   # Claude
-# or
-export GROQ_API_KEY=gsk_...           # Groq (free tier available)
+memory install
+
+export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY / GROQ_API_KEY / etc.
 ```
 
-### 2. Save a session
+Restart your AI agent. That's it — sessions are now saved and restored automatically for **every** supported agent (Claude Code, Copilot CLI, Codex, Cursor, Windsurf).
+
+### 2. Save a session manually (optional)
 
 ```bash
 memory save
@@ -301,3 +310,44 @@ PRs welcome. To add a new storage backend, implement the `BaseBackend` interface
 ## License
 
 MIT
+
+---
+
+## Codex support
+
+Codex support is available alongside the existing Claude Code integration:
+
+```bash
+memory codex setup                       # install Codex save/load hooks
+memory codex save --no-edit               # save this workspace's latest Codex session
+memory codex load                         # load this project's latest context
+memory codex checkpoint --summary-file memory-summary.md  # store a Codex-written summary
+```
+
+From the source checkout, use `python3 -m memory` in place of `memory`.
+After setup, restart Codex and review and trust the hooks using `/hooks`.
+See [CODEX.md](CODEX.md) for project-scoped setup, direct checkpoints without an
+extra API call, removal, and environments where local hooks are unavailable.
+
+---
+
+## GitHub Copilot CLI support
+
+GitHub Copilot CLI support is available as a separate additive integration:
+
+```bash
+memory copilot setup                     # install hooks in ~/.copilot/settings.json (user scope)
+memory copilot setup --project-local     # install hooks in ./.claude/settings.json (project scope)
+memory copilot load                      # load this project's latest context
+memory copilot save                      # save manually
+memory copilot checkpoint --summary-file memory-summary.md  # store a Copilot-written summary directly
+memory copilot setup --remove            # remove hooks
+```
+
+Hooks use Copilot CLI's `SessionStart` and `Stop` events:
+- **SessionStart** — injects the latest project memory as additional context at the start of each session.
+- **Stop** — saves a session checkpoint whenever the agent stops.
+
+For project-scoped setup (checked into the repo), use `--project-local`. This writes to `.claude/settings.json`, which Copilot CLI reads automatically.
+
+From the source checkout, use `python3 -m memory` in place of `memory`.
