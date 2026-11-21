@@ -30,6 +30,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(task_home / ".codex"))
     monkeypatch.setenv("MEMORY_BACKEND", "sqlite")
     monkeypatch.setenv("SQLITE_DB_PATH", str(tmp_path / "memory.db"))
+    # Local provider needs no API key, so saves reach the (mocked) compressor
+    # regardless of the host environment. Tests that assert a specific provider
+    # still override this via the explicit --provider flag.
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollama")
     monkeypatch.delenv("MEMORY_CODEX_PROJECT", raising=False)
     monkeypatch.setattr(core, "_STOPPED_FILE", task_home / ".ai-memory" / "STOPPED")
     monkeypatch.setattr(core, "_ACTIVE_SESSION_FILE", task_home / ".ai-memory" / "active_session")
