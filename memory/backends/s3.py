@@ -76,6 +76,7 @@ class S3Backend(BaseBackend):
             "title": session.title,
             "summary": session.summary,
             "tags": session.tags,
+            "model": session.model,
             "created_at": session.created_at.isoformat(),
             "updated_at": session.updated_at.isoformat(),
         }
@@ -94,6 +95,7 @@ class S3Backend(BaseBackend):
             "project": session.project,
             "title": session.title,
             "tags": session.tags,
+            "model": session.model,
             "created_at": session.created_at.isoformat(),
             "updated_at": session.updated_at.isoformat(),
         })
@@ -109,6 +111,7 @@ class S3Backend(BaseBackend):
                 title=data["title"],
                 summary=data["summary"],
                 tags=data["tags"],
+                model=data.get("model", ""),
                 created_at=datetime.fromisoformat(data["created_at"]),
                 updated_at=datetime.fromisoformat(data["updated_at"]),
             )
@@ -127,6 +130,7 @@ class S3Backend(BaseBackend):
                 title=e["title"],
                 summary="",
                 tags=e["tags"],
+                model=e.get("model", ""),
                 created_at=datetime.fromisoformat(e["created_at"]),
                 updated_at=datetime.fromisoformat(e["updated_at"]),
             )

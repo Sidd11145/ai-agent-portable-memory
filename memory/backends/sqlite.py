@@ -26,10 +26,15 @@ class SQLiteBackend(BaseBackend):
                     title       TEXT NOT NULL,
                     summary     TEXT NOT NULL,
                     tags        TEXT NOT NULL DEFAULT '[]',
+                    model       TEXT NOT NULL DEFAULT '',
                     created_at  TEXT NOT NULL,
                     updated_at  TEXT NOT NULL
                 )
             """)
+            # Migrate pre-existing databases that predate the model column.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+            if "model" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts
                 USING fts5(id UNINDEXED, title, summary, content='sessions', content_rowid='rowid')
@@ -61,6 +66,7 @@ class SQLiteBackend(BaseBackend):
             title=row["title"],
             summary=row["summary"],
             tags=json.loads(row["tags"]),
+            model=row["model"] if "model" in row.keys() else "",
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -73,10 +79,10 @@ class SQLiteBackend(BaseBackend):
             existing = conn.execute("SELECT id FROM sessions WHERE id = ?", (session.id,)).fetchone()
             if existing:
                 conn.execute("""
-                    UPDATE sessions SET project=?, title=?, summary=?, tags=?, updated_at=?
+                    UPDATE sessions SET project=?, title=?, summary=?, tags=?, model=?, updated_at=?
                     WHERE id=?
                 """, (session.project, session.title, session.summary,
-                      json.dumps(session.tags), now, session.id))
+                      json.dumps(session.tags), session.model, now, session.id))
                 conn.execute("""
                     INSERT INTO sessions_fts(sessions_fts, rowid, id, title, summary)
                     SELECT 'delete', rowid, id, title, summary FROM sessions WHERE id=?
@@ -89,10 +95,10 @@ class SQLiteBackend(BaseBackend):
                 session.created_at = session.created_at or datetime.utcnow()
                 session.updated_at = datetime.utcnow()
                 conn.execute("""
-                    INSERT INTO sessions (id, project, title, summary, tags, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO sessions (id, project, title, summary, tags, model, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (session.id, session.project, session.title, session.summary,
-                      json.dumps(session.tags), session.created_at.isoformat(), now))
+                      json.dumps(session.tags), session.model, session.created_at.isoformat(), now))
 
     def get(self, session_id: str) -> Optional[Session]:
         with self._connect() as conn:

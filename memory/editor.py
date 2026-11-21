@@ -6,6 +6,9 @@ from pathlib import Path
 
 def open_in_editor(content: str) -> str:
     """Open content in the user's $EDITOR and return the edited result."""
+    import sys
+    if not sys.stdin.isatty():
+        return content
     editor = os.environ.get("EDITOR", "nano")
     with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
         f.write(content)

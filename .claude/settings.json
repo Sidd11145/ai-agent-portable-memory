@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/python3 -c 'import sys; sys.path.insert(0, '\"'\"'/Users/i746852/AI-Agent-Portable-Memory'\"'\"'); from memory.hook import _run_hook; _run_hook()'",
+            "timeout": 120,
+            "statusMessage": "AI Agent Portable Memory"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/python3 -c 'import sys; sys.path.insert(0, '\"'\"'/Users/i746852/AI-Agent-Portable-Memory'\"'\"'); from memory.hook import _run_hook; _run_hook()'",
+            "timeout": 120,
+            "statusMessage": "AI Agent Portable Memory"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/python3 -c 'import sys; sys.path.insert(0, '\"'\"'/Users/i746852/AI-Agent-Portable-Memory'\"'\"'); from memory.hook import _run_hook; _run_hook()'",
+            "timeout": 120,
+            "statusMessage": "AI Agent Portable Memory"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/python3 -c 'import sys; sys.path.insert(0, '\"'\"'/Users/i746852/AI-Agent-Portable-Memory'\"'\"'); from memory.hook import _run_hook; _run_hook()'",
+            "timeout": 120,
+            "statusMessage": "AI Agent Portable Memory"
+          }
+        ]
+      }
+    ]
+  }
+}
