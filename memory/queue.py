@@ -46,7 +46,7 @@ def _queue_path(memory_id: str) -> Path:
 
 def enqueue(source_id: str, cwd: Path, agent: str, transcript: str,
             meta_model: Optional[str] = None, backend: Optional[str] = None,
-            project: Optional[str] = None) -> Optional[Path]:
+            project: Optional[str] = None, provider: Optional[str] = None) -> Optional[Path]:
     """Persist a raw transcript for later compression. Returns the queue file
     path, or None if there was nothing to save."""
     if not transcript or not transcript.strip():
@@ -63,6 +63,7 @@ def enqueue(source_id: str, cwd: Path, agent: str, transcript: str,
         "transcript": transcript,
         "meta_model": meta_model,
         "backend": backend,
+        "provider": provider,
         "project": project,
         "digest": digest,
         "queued_at": datetime.utcnow().isoformat(),
@@ -113,7 +114,10 @@ def _process_one(payload: dict) -> bool:
         return False  # keep queued; drain again after 'memory start --global'
 
     provider, model = resolve_provider_model(agent, {"_meta_model": meta_model})
-    if model is None:
+    if payload.get("provider"):
+        provider = payload["provider"]
+        model = meta_model
+    elif model is None:
         model = meta_model
     if not provider or not _provider_key_present(provider):
         return False  # provider unavailable right now — keep for retry
@@ -144,6 +148,26 @@ def _process_one(payload: dict) -> bool:
     return True
 
 
+def flush(path: Path) -> bool:
+    """Save one pending snapshot now, keeping it on failure or when replaced."""
+    with _session_lock(path.with_suffix(".drain.lock")):
+        with _session_lock(path.with_suffix(".lock")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return False
+            except json.JSONDecodeError:
+                path.unlink(missing_ok=True)
+                return False
+        if not _process_one(payload):
+            return False
+        with _session_lock(path.with_suffix(".lock")):
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if current == payload:
+                path.unlink(missing_ok=True)
+        return True
+
+
 def drain(limit: Optional[int] = None) -> int:
     """Compress and store queued transcripts. Returns the number successfully
     processed. Never raises — advisory, must not block the agent's turn."""
@@ -156,23 +180,8 @@ def drain(limit: Optional[int] = None) -> int:
         if limit is not None and processed >= limit:
             break
         try:
-            # Serialize drains of one item while allowing hooks to capture new
-            # snapshots during the LLM call. File updates use a separate short lock.
-            with _session_lock(path.with_suffix(".drain.lock")):
-                with _session_lock(path.with_suffix(".lock")):
-                    try:
-                        payload = json.loads(path.read_text(encoding="utf-8"))
-                    except FileNotFoundError:
-                        continue
-                    except json.JSONDecodeError:
-                        path.unlink(missing_ok=True)
-                        continue
-                if _process_one(payload):
-                    with _session_lock(path.with_suffix(".lock")):
-                        current = json.loads(path.read_text(encoding="utf-8"))
-                        if current == payload:
-                            path.unlink(missing_ok=True)
-                    processed += 1
+            if flush(path):
+                processed += 1
         except Exception:
             # Leave the file queued; a transient failure should not drop data.
             continue

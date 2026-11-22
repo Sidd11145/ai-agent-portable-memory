@@ -1451,7 +1451,9 @@ def test_declining_recording_is_remembered_and_can_be_changed(
              "cwd": str(tmp_path)}
     monkeypatch.setattr("sys.stdin", _FakeStdin(json.dumps(event)))
     hook._run_hook()
-    assert json.loads(capsys.readouterr().out) == {}
+    context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "AskUserQuestion" not in context
+    assert "memory save" in context
 
     event.update(hook_event_name="SessionStart", source="compact")
     monkeypatch.setattr("sys.stdin", _FakeStdin(json.dumps(event)))
@@ -1753,4 +1755,187 @@ def test_sessionstart_binds_process_before_the_first_user_prompt(
     assert "AskUserQuestion" in capsys.readouterr().out
     assert core.read_session_marker_for_cwd(tmp_path, claude_process=process)["session_id"] == "new-window"
     assert core.recording_agents_for_session("new-window") == []
+
+
+def test_stop_reads_an_actual_claude_transcript_and_queues_it(
+        state, tmp_path, monkeypatch):
+    import memory.queue as queue
+
+    monkeypatch.setattr(queue, "QUEUE_DIR", tmp_path / "queue")
+    monkeypatch.setattr(hook, "detect_agent", lambda: "claude")
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "anthropic")
+    monkeypatch.delenv("MEMORY_LLM_MODEL", raising=False)
+    path = tmp_path / "claude-session.jsonl"
+    messages = [
+        {"type": "user", "message": {"content": "Remember the project settings"}},
+        {"type": "assistant", "message": {"model": "claude-sonnet-4-6",
+         "content": [{"type": "text", "text": "Project settings confirmed"}]}},
+    ]
+    path.write_text("\n".join(json.dumps(message) for message in messages))
+    core.set_recording_for_session("claude-session", "claude", backend="firebase")
+    event = {"hook_event_name": "Stop", "session_id": "claude-session",
+             "cwd": str(tmp_path), "transcript_path": str(path)}
+    monkeypatch.setattr("sys.stdin", _FakeStdin(json.dumps(event)))
+    hook._run_hook()
+    pending = list(queue.QUEUE_DIR.glob("*.json"))
+    assert len(pending) == 1
+    payload = json.loads(pending[0].read_text())
+    assert payload["transcript"] == (
+        "User: Remember the project settings\n\nAssistant: Project settings confirmed")
+    assert payload["meta_model"] == "claude-sonnet-4-6"
+    assert payload["provider"] == "anthropic"
+    assert payload["backend"] == "firebase"
+
+
+def test_universal_hook_still_reads_codex_rollouts(tmp_path):
+    path = tmp_path / "codex.jsonl"
+    entries = [
+        {"type": "session_meta", "payload": {"id": "codex-session", "model": "gpt-5"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "Hello from Codex"}]}},
+    ]
+    path.write_text("\n".join(json.dumps(entry) for entry in entries))
+    event = {"transcript_path": str(path)}
+    assert hook._read_transcript(event, "codex", tmp_path) == "User: Hello from Codex"
+    assert event["_meta_model"] == "gpt-5"
+
+
+@pytest.fixture
+def current_session_save(state, tmp_path, monkeypatch):
+    from memory.backends.sqlite import SQLiteBackend
+    from memory.compressor import CompressedSummary
+    import memory.queue as queue
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(core.Path, "home", staticmethod(lambda: home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(core, "_ACTIVE_SESSION_FILE", tmp_path / "active_session")
+    monkeypatch.setattr(queue, "QUEUE_DIR", tmp_path / "queue")
+    monkeypatch.setattr(hook, "detect_agent", lambda: "claude")
+    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SSE_PORT", raising=False)
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "anthropic")
+    monkeypatch.delenv("MEMORY_LLM_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("MEMORY_BACKEND", "sqlite")
+    process = {"pid": 111, "started_at": "Sun Nov 22 14:00:00 2026"}
+    monkeypatch.setattr(core, "get_claude_process_identity", lambda: process)
+    core.write_session_marker("win-A", None, tmp_path, claude_process=process)
+    core.write_session_marker("win-B", None, tmp_path, claude_process={
+        "pid": 222, "started_at": "Sun Nov 22 14:01:00 2026"})
+    core.set_recording_for_session("win-A", "claude", backend="firebase")
+    core.set_recording_for_session("win-B", "claude", backend="sqlite")
+    project = home / ".claude" / "projects" / "test-project"
+    project.mkdir(parents=True)
+    for sid, text in (("win-A", "Window A conversation"), ("win-B", "Window B conversation")):
+        entries = [
+            {"type": "user", "message": {"content": text}},
+            {"type": "assistant", "message": {"model": "claude-sonnet-4-6",
+             "content": [{"type": "text", "text": "Confirmed"}]}},
+        ]
+        (project / (sid + ".jsonl")).write_text("\n".join(json.dumps(entry) for entry in entries))
+    db = SQLiteBackend(tmp_path / "memory.db")
+    db.init()
+    backend_calls = []
+
+    def get_backend(name=None):
+        backend_calls.append(name)
+        return db
+
+    monkeypatch.setattr(core, "get_backend", get_backend)
+    compressed = []
+
+    def compress(transcript, provider=None, model=None):
+        compressed.append((transcript, provider, model))
+        return CompressedSummary(
+            "Saved conversation", "project-A",
+            "## Title\nSaved conversation\n\n## Project\nproject-A\n\n## Tags\ntest", ["test"])
+
+    monkeypatch.setattr("memory.compressor.compress", compress)
+    monkeypatch.setattr("memory.editor.open_in_editor", lambda *args: pytest.fail("Unexpected editor"))
+    return db, backend_calls, compressed
+
+
+def test_bare_save_uses_current_session_settings_and_updates_one_entry(
+        current_session_save, tmp_path):
+    from click.testing import CliRunner
+    from memory.cli import cli
+    import memory.queue as queue
+
+    db, backends, compressed = current_session_save
+    other_snapshot = queue.enqueue("win-B", tmp_path, "claude", "User: Other pending work",
+                                   meta_model="claude-sonnet-4-6", backend="sqlite")
+    core._ACTIVE_SESSION_FILE.write_text("other-window-memory")
+    runner = CliRunner()
+    for _ in range(2):
+        result = runner.invoke(cli, ["save"])
+        assert result.exit_code == 0, result.output
+        assert "Session saved!" in result.output
+        assert "firebase" in result.output
+    assert len(db.list()) == 1
+    assert db.list()[0].id == queue._memory_id("win-A:claude-sonnet-4-6")
+    assert backends == ["firebase", "firebase"]
+    assert all(call == ("User: Window A conversation\n\nAssistant: Confirmed",
+                        "anthropic", "claude-sonnet-4-6") for call in compressed)
+    assert other_snapshot.exists()
+    assert core._ACTIVE_SESSION_FILE.read_text() == "other-window-memory"
+
+
+def test_current_session_save_preserves_explicit_overrides(current_session_save):
+    from click.testing import CliRunner
+    from memory.cli import cli
+
+    db, backends, compressed = current_session_save
+    result = CliRunner().invoke(cli, ["save", "--provider", "openai", "--model", "gpt-5",
+                                      "--backend", "s3"])
+    assert result.exit_code == 0, result.output
+    assert compressed[0][1:] == ("openai", "gpt-5")
+    assert backends == ["s3"]
+    assert db.list()[0].model == "gpt-5"
+    assert core.get_backend_for_session("win-A") == "firebase"
+
+
+def test_current_session_save_failure_keeps_transcript_for_retry(
+        current_session_save, monkeypatch):
+    from click.testing import CliRunner
+    from memory.cli import cli
+    import memory.queue as queue
+
+    db, _, _ = current_session_save
+
+    class UnavailableBackend:
+        def init(self):
+            pass
+
+        def get(self, memory_id):
+            return None
+
+        def save(self, session):
+            raise RuntimeError("Backend temporarily unavailable")
+
+    monkeypatch.setattr(core, "get_backend", lambda name=None: UnavailableBackend())
+    runner = CliRunner()
+    result = runner.invoke(cli, ["save"])
+    assert result.exit_code == 1
+    assert "Transcript retained for retry" in result.output
+    pending = list(queue.QUEUE_DIR.glob("*.json"))
+    assert len(pending) == 1
+    assert json.loads(pending[0].read_text())["source_id"] == "win-A"
+    monkeypatch.setattr(core, "get_backend", lambda name=None: db)
+    result = runner.invoke(cli, ["save"])
+    assert result.exit_code == 0, result.output
+    assert len(db.list()) == 1
+    assert list(queue.QUEUE_DIR.glob("*.json")) == []
+
+
+def test_pasted_transcript_is_preserved_inside_claude(current_session_save):
+    from click.testing import CliRunner
+    from memory.cli import cli
+
+    db, _, compressed = current_session_save
+    result = CliRunner().invoke(cli, ["save", "--no-edit"], input="User: Explicit pasted transcript")
+    assert result.exit_code == 0, result.output
+    assert compressed[0][0] == "User: Explicit pasted transcript"
+    assert len(db.list()) == 1
 

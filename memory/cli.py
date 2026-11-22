@@ -110,6 +110,43 @@ def load(session_id, copy):
         console.print("\n[dim]Tip: use [bold]--copy[/bold] to copy to clipboard[/dim]")
 
 
+def _save_current_claude_session(session_id, cwd, provider, model, backend_override, project):
+    from . import queue
+    from .core import get_backend, resolve_backend
+    from .hook import resolve_provider_model
+
+    transcript, detected_model, transcript_id = _read_claude_transcript(session_id)
+    if not transcript.strip() or transcript_id != session_id:
+        raise click.ClickException("No readable conversation found for this Claude session.")
+    resolved_provider, resolved_model = resolve_provider_model(
+        "claude", {"_meta_model": detected_model})
+    resolved_provider = provider or resolved_provider
+    resolved_model = model or resolved_model
+    if not resolved_provider:
+        raise click.ClickException("No LLM provider resolved for this session. Set MEMORY_LLM_PROVIDER.")
+    backend_name = resolve_backend(cwd, backend_override, session_id=session_id) or "sqlite"
+    path = queue.enqueue(
+        session_id, cwd, "claude", transcript, meta_model=resolved_model,
+        backend=backend_name, project=project, provider=resolved_provider)
+    memory_id = queue._memory_id(f"{session_id}:{resolved_model or 'default'}")
+    console.print(f"[dim]Saving this session to {backend_name} with {resolved_provider}...[/dim]")
+    try:
+        saved = queue.flush(path)
+        # Another session's queue drain may have completed this same snapshot.
+        if not saved and not path.exists():
+            backend = get_backend(backend_name)
+            backend.init()
+            saved = backend.get(memory_id) is not None
+    except Exception as exc:
+        raise click.ClickException(f"Save failed. Transcript retained for retry: {exc}") from exc
+    if not saved:
+        raise click.ClickException(
+            "Save could not complete. Transcript queued for retry. Check the provider credentials.")
+    console.print("[green]Session saved![/green]")
+    console.print(f"  ID: {memory_id}")
+    console.print(f"  Backend: {backend_name}")
+
+
 @cli.command()
 @click.option("--provider", "-P", default=None,
               help="LLM provider: openai | anthropic | groq (overrides MEMORY_LLM_PROVIDER env)")
@@ -135,7 +172,7 @@ def load(session_id, copy):
 def save(provider, model, project, no_edit,
          from_claude, from_chatgpt, from_cursor, from_windsurf, from_file,
          target_session_id, source_session_id, pick, end_session, backend_override):
-    """Save a session from any AI tool — paste, file, or auto-read."""
+    """Save the current Claude session, or a supplied transcript."""
     from .core import (create_session, set_active_session_id, get_active_session_id,
                        get_memory_session_for_claude, set_memory_session_for_claude,
                        clear_memory_session_for_claude, is_stopped)
@@ -152,6 +189,24 @@ def save(provider, model, project, no_edit,
     if sum(bool(s) for s in sources) > 1:
         console.print("[red]Use only one --from-* option at a time.[/red]")
         sys.exit(1)
+
+    stdin_transcript = None
+    if (not any(sources) and pick is None and not source_session_id
+            and not target_session_id and not end_session):
+        from .hook import detect_agent
+        if detect_agent() == "claude":
+            if not sys.stdin.isatty():
+                stdin_transcript = sys.stdin.read()
+            if not stdin_transcript or not stdin_transcript.strip():
+                sid, _ = _resolve_window_identity(Path.cwd(), agent="claude")
+                if sid:
+                    _save_current_claude_session(
+                        sid, Path.cwd(), provider, model, backend_override, project)
+                    return
+                if not sys.stdin.isatty():
+                    raise click.ClickException(
+                        "Current Claude session could not be identified. "
+                        "Use --from-claude --source-session with its session ID.")
 
     # --pick: choose which Claude window (transcript) to save. Useful when
     # several windows are open on this project — the plain "latest transcript"
@@ -260,7 +315,7 @@ def save(provider, model, project, no_edit,
         console.print("[bold cyan]Paste your chat transcript below.[/bold cyan]")
         console.print("[dim]When done, press Ctrl+D (Mac/Linux) or Ctrl+Z then Enter (Windows).[/dim]\n")
         try:
-            transcript = sys.stdin.read()
+            transcript = stdin_transcript if stdin_transcript is not None else sys.stdin.read()
         except KeyboardInterrupt:
             console.print("\n[yellow]Cancelled.[/yellow]")
             return

@@ -415,13 +415,21 @@ def _recording_setup_context(session_id: str, cwd: Path) -> str:
     """Give Claude the exact commands for applying this session's user choice."""
     from .core import get_recording_decision
 
+    commands = (
+        "Portable memory commands for this session. `memory save` saves the current "
+        "conversation immediately, using its session ID, LLM provider, model, and "
+        "selected storage backend. Run it in the session's project directory. "
+        "`memory status` shows this session's recording and storage settings. "
+        "Automatic recording captures transcripts into a durable queue after responses. "
+        "Queued snapshots are processed on the next session start or by `memory save`.\n"
+    )
     if get_recording_decision(session_id) is not None:
-        return ""
+        return commands
     start_command = shlex.join([
         "memory", "start", "--agent", "claude", "--session-id", session_id])
     stop_command = shlex.join([
         "memory", "stop", "--agent", "claude", "--session-id", session_id])
-    return (
+    return commands + (
         "Portable memory setup for this session. Recording is awaiting your choice.\n"
         "At your next response, ask the user whether to record this session now. "
         "Use AskUserQuestion when available. If the user agrees, ask which storage "
@@ -531,10 +539,12 @@ def _run_hook() -> None:
                     if is_recording_session(
                             cwd, agent, session_id=source_id,
                             port=os.environ.get("CLAUDE_CODE_SSE_PORT")):
+                        provider, model = resolve_provider_model(agent, event)
                         _queue.enqueue(
                             source_id, cwd, agent, transcript,
-                            meta_model=event.get("_meta_model"),
+                            meta_model=model or event.get("_meta_model"),
                             backend=resolve_backend(cwd, session_id=source_id) or "sqlite",
+                            provider=provider,
                         )
             # Stop finishes a response. SessionEnd finishes the session, including
             # sessions whose transcript is empty or below the compaction threshold.
@@ -564,21 +574,23 @@ def _read_transcript(event: dict, agent: str, cwd: Path) -> str:
     Side effect: for Codex, stashes the model from the rollout metadata into
     event["_meta_model"] so resolve_provider_model can match it.
     """
-    # Codex provides transcript_path directly in the hook payload.
     path = event.get("transcript_path")
-    if path and Path(path).exists():
-        from .codex import read_transcript as _read_codex
-        transcript, metadata = _read_codex(Path(path))
-        model = metadata.get("model") or metadata.get("model_slug")
+    if agent == "claude":
+        from .cli import _parse_claude_jsonl, _read_claude_transcript
+        if path and Path(path).exists():
+            transcript, model = _parse_claude_jsonl(Path(path))
+        else:
+            session_id = event.get("session_id") or event.get("sessionId")
+            transcript, model, _ = _read_claude_transcript(session_id)
         if model:
             event["_meta_model"] = model
         return transcript
 
-    # Claude Code: read from ~/.claude/projects/
-    if agent == "claude":
-        from .cli import _read_claude_transcript
-        session_id = event.get("session_id") or event.get("sessionId")
-        transcript, model, _ = _read_claude_transcript(session_id)
+    # Codex provides its rollout path directly in the hook payload.
+    if path and Path(path).exists():
+        from .codex import read_transcript as _read_codex
+        transcript, metadata = _read_codex(Path(path))
+        model = metadata.get("model") or metadata.get("model_slug")
         if model:
             event["_meta_model"] = model
         return transcript
