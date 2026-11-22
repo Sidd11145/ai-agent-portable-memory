@@ -43,6 +43,7 @@ HOOK_MARKER = "AI Agent Portable Memory"
 # Hook events we care about — same names work for Claude Code and Copilot CLI.
 _SESSION_START = "SessionStart"
 _SAVE_EVENTS = {"Stop", "PostCompact", "SessionEnd"}
+_LINK_EVENTS = {"UserPromptSubmit"}
 
 # Env vars each agent sets for its *own* selected model. Reading these is not
 # "guessing the provider from the agent name" — it is reading the model the user
@@ -178,7 +179,7 @@ def configure_hooks(path: Path, remove: bool = False) -> None:
 
     command = _hook_command()
 
-    for event in (_SESSION_START, *sorted(_SAVE_EVENTS)):
+    for event in (_SESSION_START, *sorted(_SAVE_EVENTS), *sorted(_LINK_EVENTS)):
         groups: list = events.get(event, [])
         if not isinstance(groups, list):
             groups = []
@@ -239,7 +240,7 @@ def save_session(source_id: str, cwd: Path, transcript: str = "",
                  provider: Optional[str] = None, model: Optional[str] = None,
                  event: Optional[dict] = None) -> Optional[Session]:
     """Compress and save a session. Returns None if not recording or nothing to save."""
-    from .core import get_backend, is_recording
+    from .core import get_backend, is_recording, resolve_backend
     from .compressor import compress, _parse_response, scrub_secrets
 
     # Opt-in gate: only save if this (directory, agent) pair was explicitly started.
@@ -271,13 +272,14 @@ def save_session(source_id: str, cwd: Path, transcript: str = "",
     memory_id = _memory_id(f"{source_id}:{resolved_model or 'default'}")
     digest = hashlib.sha256(transcript.encode()).hexdigest()
     digest_file = _digest_path(memory_id)
+    backend_name = resolve_backend(cwd)
 
     # Skip if transcript hasn't changed since last save.
     if digest_file.exists():
         try:
             state = json.loads(digest_file.read_text(encoding="utf-8"))
             if state.get("digest") == digest:
-                backend = get_backend()
+                backend = get_backend(backend_name)
                 backend.init()
                 existing = backend.get(memory_id)
                 if existing:
@@ -289,7 +291,7 @@ def save_session(source_id: str, cwd: Path, transcript: str = "",
     summary = scrub_secrets(compressed.summary)
     parsed = _parse_response(summary)
 
-    backend = get_backend()
+    backend = get_backend(backend_name)
     backend.init()
     existing = backend.get(memory_id)
     now = datetime.utcnow()
@@ -370,15 +372,16 @@ def _message_count(transcript: str) -> int:
 
 def load_context(cwd: Path, project: Optional[str] = None,
                  session_id: Optional[str] = None, agent: Optional[str] = None) -> str:
-    from .core import get_backend, is_recording
+    from .core import get_backend, is_recording_session, resolve_backend
     from .cli import _format_context
 
-    # Opt-in gate: only inject context if this (directory, agent) was started.
+    # Opt-in gate: only inject context if this window (session) was started.
     resolved_agent = agent or detect_agent()
-    if not is_recording(cwd, resolved_agent):
+    if not is_recording_session(cwd, resolved_agent, session_id=session_id,
+                                port=os.environ.get("CLAUDE_CODE_SSE_PORT")):
         return ""
 
-    backend = get_backend()
+    backend = get_backend(resolve_backend(cwd, session_id=session_id))
     backend.init()
     project_label = _project(cwd, project)
 
@@ -408,6 +411,40 @@ def load_context(cwd: Path, project: Optional[str] = None,
 
 # ── Universal hook handler ────────────────────────────────────────────────────
 
+def _recording_setup_context(session_id: str, cwd: Path) -> str:
+    """Give Claude the exact commands for applying this session's user choice."""
+    from .core import get_recording_decision
+
+    commands = (
+        "Portable memory commands for this session. `memory save` saves the current "
+        "conversation immediately, using its session ID, LLM provider, model, and "
+        "selected storage backend. Run it in the session's project directory. "
+        "`memory status` shows this session's recording and storage settings. "
+        "Automatic recording captures transcripts into a durable queue after responses. "
+        "Queued snapshots are processed on the next session start or by `memory save`.\n"
+    )
+    if get_recording_decision(session_id) is not None:
+        return commands
+    start_command = shlex.join([
+        "memory", "start", "--agent", "claude", "--session-id", session_id])
+    stop_command = shlex.join([
+        "memory", "stop", "--agent", "claude", "--session-id", session_id])
+    return commands + (
+        "Portable memory setup for this session. Recording is awaiting your choice.\n"
+        "At your next response, ask the user whether to record this session now. "
+        "Use AskUserQuestion when available. If the user agrees, ask which storage "
+        "backend to use, offering SQLite (local), Firebase, Supabase, and S3. "
+        "If the user already supplied these choices, apply them. If you already "
+        "asked and are awaiting an answer, wait for that answer.\n"
+        f"Run commands from {shlex.quote(str(cwd))}.\n"
+        f"To enable recording, run {start_command} --backend <chosen-backend>, "
+        "where chosen-backend is sqlite, firebase, supabase, or s3.\n"
+        f"If the user declines or wants to decide later, run {stop_command}. "
+        "They can enable recording later with the start command.\n"
+        "Confirm the command result before reporting recording as enabled."
+    )
+
+
 def _run_hook() -> None:
     """Entry point called by every agent's hook command.
 
@@ -429,10 +466,58 @@ def _run_hook() -> None:
         agent = detect_agent()
 
         if name == _SESSION_START:
-            context = load_context(cwd, agent=agent)
+            from .core import (prepare_recording_session, refresh_and_promote,
+                               prune_session_backends, write_session_marker,
+                               get_claude_process_identity)
+            sid = None if source_id == "unknown" else source_id
+            if sid and agent == "claude":
+                prepare_recording_session(sid, event.get("source") or "startup")
+
+            port = os.environ.get("CLAUDE_CODE_SSE_PORT")
+            refresh_and_promote(port, sid, promote_choices=agent != "claude")
+            if sid:
+                write_session_marker(sid, port, cwd, claude_process=(
+                    get_claude_process_identity() if agent == "claude" else None))
+            prune_session_backends(keep_sessions=[sid] if sid else [])
+            setup = _recording_setup_context(sid, cwd) if sid and agent == "claude" else ""
+
+            # Drain any transcripts queued by a previous (possibly killed) session.
+            # Safe here: the process is alive and stable, so the slow LLM call can
+            # run without racing window-close.
+            try:
+                from . import queue as _queue
+                _queue.drain()
+            except Exception:
+                pass
+            try:
+                context = load_context(cwd, agent=agent, session_id=sid)
+            except Exception as exc:
+                print(f"memory: context load failed: {exc}", file=sys.stderr)
+                context = ""
+            if sid and agent == "claude":
+                context = (
+                    f"Portable memory session ID: {sid}\n" + setup + "\n" + context
+                )
             output = (
                 {"hookSpecificOutput": {"hookEventName": name, "additionalContext": context}}
                 if context else {}
+            )
+
+        elif name in _LINK_EVENTS:
+            # Refresh the link and marker each turn. Claude's commands apply
+            # choices directly to the session ID supplied in this hook payload.
+            # Pure disk — no LLM, network, or save.
+            from .core import refresh_and_promote, write_session_marker, get_claude_process_identity
+            port = os.environ.get("CLAUDE_CODE_SSE_PORT")
+            sid = None if source_id == "unknown" else source_id
+            refresh_and_promote(port, sid, promote_choices=agent != "claude")
+            if sid:
+                write_session_marker(sid, port, cwd, claude_process=(
+                    get_claude_process_identity() if agent == "claude" else None))
+            setup = _recording_setup_context(sid, cwd) if sid and agent == "claude" else ""
+            output = (
+                {"hookSpecificOutput": {"hookEventName": name, "additionalContext": setup}}
+                if setup else {}
             )
 
         elif name in _SAVE_EVENTS:
@@ -446,8 +531,31 @@ def _run_hook() -> None:
                     threshold = int(os.environ.get("MEMORY_MIN_MESSAGES", "10"))
                     should_save = _message_count(transcript) >= threshold
                 if should_save:
-                    save_session(source_id, cwd, transcript=transcript,
-                                 agent=agent, event=event)
+                    # Capture the raw transcript instantly and compress later on the
+                    # next SessionStart. A plain disk write survives window-close,
+                    # whereas an inline LLM call here would be killed mid-flight.
+                    from .core import is_recording_session, resolve_backend
+                    from . import queue as _queue
+                    if is_recording_session(
+                            cwd, agent, session_id=source_id,
+                            port=os.environ.get("CLAUDE_CODE_SSE_PORT")):
+                        provider, model = resolve_provider_model(agent, event)
+                        _queue.enqueue(
+                            source_id, cwd, agent, transcript,
+                            meta_model=model or event.get("_meta_model"),
+                            backend=resolve_backend(cwd, session_id=source_id) or "sqlite",
+                            provider=provider,
+                        )
+            # Stop finishes a response. SessionEnd finishes the session, including
+            # sessions whose transcript is empty or below the compaction threshold.
+            if name == "SessionEnd" and source_id != "unknown":
+                from .core import (clear_recording_for_session, remove_session_marker,
+                                   get_session_for_port)
+                clear_recording_for_session(source_id, agent)
+                port = os.environ.get("CLAUDE_CODE_SSE_PORT")
+                if port and get_session_for_port(port) == source_id:
+                    clear_recording_for_session(port, agent, table="ports")
+                remove_session_marker(source_id)
             output = {}
 
         else:
@@ -466,21 +574,23 @@ def _read_transcript(event: dict, agent: str, cwd: Path) -> str:
     Side effect: for Codex, stashes the model from the rollout metadata into
     event["_meta_model"] so resolve_provider_model can match it.
     """
-    # Codex provides transcript_path directly in the hook payload.
     path = event.get("transcript_path")
-    if path and Path(path).exists():
-        from .codex import read_transcript as _read_codex
-        transcript, metadata = _read_codex(Path(path))
-        model = metadata.get("model") or metadata.get("model_slug")
+    if agent == "claude":
+        from .cli import _parse_claude_jsonl, _read_claude_transcript
+        if path and Path(path).exists():
+            transcript, model = _parse_claude_jsonl(Path(path))
+        else:
+            session_id = event.get("session_id") or event.get("sessionId")
+            transcript, model, _ = _read_claude_transcript(session_id)
         if model:
             event["_meta_model"] = model
         return transcript
 
-    # Claude Code: read from ~/.claude/projects/
-    if agent == "claude":
-        from .cli import _read_claude_transcript
-        session_id = event.get("session_id") or event.get("sessionId")
-        transcript, model, _ = _read_claude_transcript(session_id)
+    # Codex provides its rollout path directly in the hook payload.
+    if path and Path(path).exists():
+        from .codex import read_transcript as _read_codex
+        transcript, metadata = _read_codex(Path(path))
+        model = metadata.get("model") or metadata.get("model_slug")
         if model:
             event["_meta_model"] = model
         return transcript
