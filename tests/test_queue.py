@@ -193,6 +193,7 @@ def test_session_pin_resolves_over_env_at_drain(qstate, tmp_path, monkeypatch):
                             "t", "p", "## Title\nt\n\n## Project\np\n\n## Tags\nx", ["x"]))
     monkeypatch.setattr(hook, "_provider_key_present", lambda provider: True)
     monkeypatch.setenv("MEMORY_BACKEND", "sqlite")
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "anthropic")
 
     core.set_recording_for_session("sess-1", "claude")
     core.set_backend_for_session("sess-1", "firebase")  # per-window pin wins
