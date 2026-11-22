@@ -1939,3 +1939,34 @@ def test_pasted_transcript_is_preserved_inside_claude(current_session_save):
     assert compressed[0][0] == "User: Explicit pasted transcript"
     assert len(db.list()) == 1
 
+
+def test_windows_session_lookup_uses_process_metadata(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    identity = {"pid": 222, "started_at": "2026-11-22T14:00:00.0000000Z"}
+    calls = []
+
+    def run(arguments, **kwargs):
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, stdout=json.dumps(identity))
+
+    monkeypatch.setattr(core, "os", SimpleNamespace(name="nt", getppid=lambda: 111))
+    monkeypatch.setattr(core.subprocess, "run", run)
+    assert core.get_claude_process_identity() == identity
+    assert calls[0][:4] == ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
+    assert "$memoryProcessId = 111" in calls[0][4]
+    assert "Get-CimInstance Win32_Process" in calls[0][4]
+    assert "CreationDate" in calls[0][4]
+
+
+@pytest.mark.parametrize("output", ["", "not json", "{}"])
+def test_windows_session_lookup_handles_unavailable_identity(monkeypatch, output):
+    import subprocess
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(core, "os", SimpleNamespace(name="nt", getppid=lambda: 111))
+    monkeypatch.setattr(core.subprocess, "run", lambda arguments, **kwargs:
+                        subprocess.CompletedProcess(arguments, 0, stdout=output))
+    assert core.get_claude_process_identity() is None
+

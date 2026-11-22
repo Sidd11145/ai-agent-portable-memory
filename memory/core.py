@@ -431,10 +431,44 @@ def prune_session_backends(max_ports: int = 64, *, keep_sessions=()) -> None:
 #   - Markers older than _MARKER_STALE_SECONDS are ignored (window was hard-killed).
 #   - SessionEnd removes the marker when the session closes.
 
+def _get_windows_claude_process_identity(process_id: int) -> Optional[dict]:
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$memoryProcessId = PROCESS_ID
+for ($memoryDepth = 0; $memoryDepth -lt 32; $memoryDepth++) {
+    if ($memoryProcessId -le 1) { break }
+    $memoryProcess = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $memoryProcessId)
+    if ($null -eq $memoryProcess) { break }
+    $memoryClaudeNode = ($memoryProcess.Name -ieq 'node.exe' -and
+        $memoryProcess.CommandLine -match '@anthropic-ai[\\/]claude-code[\\/]cli\.js')
+    if ($memoryProcess.Name -ieq 'claude.exe' -or $memoryClaudeNode) {
+        [ordered]@{
+            pid = [int]$memoryProcess.ProcessId
+            started_at = $memoryProcess.CreationDate.ToUniversalTime().ToString('o')
+        } | ConvertTo-Json -Compress
+        break
+    }
+    if ($memoryProcess.ParentProcessId -eq $memoryProcessId) { break }
+    $memoryProcessId = [int]$memoryProcess.ParentProcessId
+}
+""".replace("PROCESS_ID", str(int(process_id)))
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, check=True, timeout=10)
+    if not result.stdout.strip():
+        return None
+    identity = json.loads(result.stdout)
+    if int(identity["pid"]) <= 1 or not identity["started_at"]:
+        return None
+    return {"pid": int(identity["pid"]), "started_at": identity["started_at"]}
+
+
 def get_claude_process_identity(process_id: Optional[int] = None) -> Optional[dict]:
     """Find the owning Claude process through the calling process's ancestors."""
     pid = process_id or os.getppid()
     try:
+        if os.name == "nt":
+            return _get_windows_claude_process_identity(pid)
         for _ in range(32):
             if pid <= 1:
                 break
@@ -450,7 +484,7 @@ def get_claude_process_identity(process_id: Optional[int] = None) -> Optional[di
             if parent_pid == pid:
                 break
             pid = parent_pid
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         pass
     return None
 
