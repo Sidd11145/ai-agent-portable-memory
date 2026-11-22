@@ -958,7 +958,13 @@ def status(session_id):
     detected = "claude" if session_id else detect_agent()
     sid, port = _resolve_window_identity(cwd, session_id, detected)
     recording_label = _status_recording_label(cwd, session_id, detected)
-    provider, model = resolve_provider_model(detected, {})
+    transcript_model = None
+    if detected == "claude" and sid:
+        try:
+            _, transcript_model, _ = _read_claude_transcript(sid)
+        except OSError:
+            pass
+    provider, model = resolve_provider_model(detected, {"_meta_model": transcript_model})
     hook_path = _project_hook_path(detected)
     hook_installed = bool(hook_path and hook_path.exists()
                           and "AI Agent Portable Memory" in hook_path.read_text(encoding="utf-8"))

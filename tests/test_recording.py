@@ -1970,3 +1970,33 @@ def test_windows_session_lookup_handles_unavailable_identity(monkeypatch, output
                         subprocess.CompletedProcess(arguments, 0, stdout=output))
     assert core.get_claude_process_identity() is None
 
+
+def test_status_infers_provider_from_its_current_transcript(current_session_save, monkeypatch):
+    from click.testing import CliRunner
+    from memory.cli import cli
+
+    monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    path = core.Path.home() / ".claude" / "projects" / "test-project" / "win-A.jsonl"
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    entries[1]["message"]["model"] = "claude-sonnet-5-5"
+    path.write_text("\n".join(json.dumps(entry) for entry in entries))
+    result = CliRunner().invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "win-A" in result.output
+    assert "anthropic / claude-sonnet-5-5" in result.output
+    assert "no API key" in result.output
+
+
+def test_status_preserves_explicit_provider_and_model(current_session_save, monkeypatch):
+    from click.testing import CliRunner
+    from memory.cli import cli
+
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("MEMORY_LLM_MODEL", "gpt-5")
+    result = CliRunner().invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "openai / gpt-5" in result.output
+
