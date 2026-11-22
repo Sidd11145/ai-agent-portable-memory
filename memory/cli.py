@@ -644,17 +644,42 @@ def use(session_id):
     console.print("[dim]All saves will update this session until you run [bold]memory use[/bold] again.[/dim]")
 
 
+def _resolve_window_identity(cwd: Path, session_id: Optional[str] = None,
+                             agent: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    """Resolve the same session for recording, stopping, and status."""
+    from .core import (get_session_for_port, read_session_marker_for_cwd,
+                       get_claude_process_identity)
+
+    # An explicit identity takes precedence over an inherited or reused port.
+    sid = session_id or (os.environ.get("CLAUDE_SESSION_ID")
+                         if agent in (None, "claude") else None)
+    if sid:
+        return sid, None
+    port = os.environ.get("CLAUDE_CODE_SSE_PORT")
+    if port and agent not in (None, "claude"):
+        return get_session_for_port(port), port
+    if agent not in (None, "claude"):
+        return None, None
+    marker = read_session_marker_for_cwd(
+        cwd, port=port, claude_process=get_claude_process_identity())
+    if marker:
+        return marker.get("session_id") or None, None
+    return None, port
+
+
 @cli.command()
 @click.option("--agent", default=None,
               help="Agent to disable here (defaults to the detected agent).")
+@click.option("--session-id", default=None, help="Claude session ID supplied by the session hook.")
 @click.option("--all", "all_agents", is_flag=True,
               help="Disable every agent currently recording in this directory.")
 @click.option("--global", "global_kill", is_flag=True,
               help="Flip the global kill-switch (stops ALL memory everywhere).")
-def stop(agent, all_agents, global_kill):
-    """Stop recording in THIS directory for an agent (or globally with --global)."""
+def stop(agent, session_id, all_agents, global_kill):
+    """Stop recording for this session or directory (or globally with --global)."""
     from .core import (set_stopped, is_stopped, disable_recording,
-                       recording_agents)
+                       recording_agents, recording_agents_for_session,
+                       clear_recording_for_session)
     from .hook import detect_agent
 
     if global_kill:
@@ -667,51 +692,115 @@ def stop(agent, all_agents, global_kill):
         return
 
     cwd = Path.cwd()
+    name = agent or ("claude" if session_id else detect_agent())
+    sid, port = _resolve_window_identity(cwd, session_id, name)
+
     if all_agents:
-        targets = recording_agents(cwd)
+        if port or sid:
+            targets = (recording_agents_for_session(sid) if sid else [])
+            if port and not targets:
+                targets = recording_agents_for_session(port, table="ports")
+        else:
+            targets = recording_agents(cwd)
+            # Silently clean up any stale claude entries in enabled.json (written by
+            # older versions before per-window isolation was enforced). Claude is now
+            # strictly session-scoped and must never appear in enabled.json.
+            if "claude" in targets:
+                disable_recording(cwd, "claude")
+                targets = [a for a in targets if a != "claude"]
         if not targets:
             console.print("[yellow]No agents are recording in this directory.[/yellow]")
             return
     else:
-        targets = [agent or detect_agent()]
+        targets = [name]
 
     for name in targets:
-        disable_recording(cwd, name)
-        _toggle_project_hook(name, remove=True)
-        console.print(f"[green]Stopped recording [bold]{name}[/bold] in {cwd}[/green]")
+        if name == "claude" and not sid:
+            console.print(
+                "[yellow]No live Claude window identified. Use --session-id to select it.[/yellow]")
+            continue
+        if port or sid:
+            if sid:
+                clear_recording_for_session(sid, name, table="sessions")
+            if port:
+                clear_recording_for_session(port, name, table="ports")
+        else:
+            disable_recording(cwd, name)
+        where = "this window" if (port or sid) else str(cwd)
+        console.print(f"[green]Stopped recording [bold]{name}[/bold] in {where}[/green]")
 
 
 @cli.command()
-@click.option("--agent", default=None,
-              help="Agent to enable here (defaults to the detected agent).")
-@click.option("--global", "global_resume", is_flag=True,
-              help="Lift the global kill-switch (re-enable memory everywhere).")
-def start(agent, global_resume):
-    """Start recording in THIS directory for an agent (project-local, opt-in)."""
-    from .core import set_stopped, is_stopped, enable_recording
+@click.option('--agent', default=None,
+              help='Agent to enable here (defaults to the detected agent).')
+@click.option('--session-id', default=None, help='Claude session ID supplied by the session hook.')
+@click.option('--backend', 'backend_name', default=None,
+              help='Storage backend for this session (sqlite|supabase|s3|firebase).')
+@click.option('--global', 'global_resume', is_flag=True,
+              help='Lift the global kill-switch (re-enable memory everywhere).')
+def start(agent, session_id, backend_name, global_resume):
+    """Start recording for this session or directory."""
+    from .core import (set_stopped, is_stopped, enable_recording, resolve_backend,
+                       set_recording_for_session, _KNOWN_BACKENDS)
     from .hook import detect_agent
 
     if global_resume:
         if not is_stopped():
-            console.print("[yellow]Global kill-switch already off.[/yellow]")
+            console.print('[yellow]Global kill-switch already off.[/yellow]')
             return
         set_stopped(False)
-        console.print("[bold green]Global kill-switch lifted.[/bold green]")
+        console.print('[bold green]Global kill-switch lifted.[/bold green]')
         return
 
     cwd = Path.cwd()
-    name = agent or detect_agent()
-    if name == "unknown":
-        console.print("[yellow]Could not detect the current agent.[/yellow] "
-                      "Pass [bold]--agent claude|codex|copilot|cursor|windsurf[/bold].")
+    name = agent or ('claude' if session_id else detect_agent())
+    if name == 'unknown':
+        console.print('[yellow]Could not detect the current agent.[/yellow] '
+                      'Pass [bold]--agent claude|codex|copilot|cursor|windsurf[/bold].')
         return
 
-    enable_recording(cwd, name)
+    sid, port = _resolve_window_identity(cwd, session_id, name)
+    per_window = bool(sid or port)
+    if backend_name and backend_name not in _KNOWN_BACKENDS:
+        console.print(f"[red]Unknown backend: {backend_name}. Choose: {', '.join(_KNOWN_BACKENDS)}[/red]")
+        return
+    if not sid and name == 'claude':
+        console.print(
+            "[red]Can't start Claude recording: no live Claude window detected "
+            '(CLAUDE_CODE_SSE_PORT does not resolve a unique session marker).[/red]')
+        console.print(
+            '[dim]Use [bold]--session-id[/bold] with the ID supplied by the session hook.[/dim]')
+        return
+    if backend_name and not per_window:
+        console.print(
+            f'[yellow]--backend {backend_name} requires a session identity. '
+            f'Set MEMORY_BACKEND={backend_name} in the launching shell instead.[/yellow]')
+        return
+    if is_stopped():
+        console.print('[yellow]The global kill-switch is on. '
+                      'Run [bold]memory start --global[/bold] to lift it.[/yellow]')
+        return
+
+    selected_backend = (backend_name or resolve_backend(cwd, session_id=sid) or 'sqlite').lower()
+    if selected_backend not in _KNOWN_BACKENDS:
+        console.print(f'[red]Unknown backend: {selected_backend}[/red]')
+        return
+    # Install before committing the session's choice.
     path = _toggle_project_hook(name, remove=False)
-    console.print(f"[bold green]Recording started for [bold]{name}[/bold] in {cwd}[/bold green]")
+    if sid:
+        set_recording_for_session(sid, name, backend=selected_backend)
+    elif port:
+        set_recording_for_session(port, name, table='ports', backend=selected_backend)
+    else:
+        enable_recording(cwd, name)
+
+    where = 'this window' if per_window else str(cwd)
+    console.print(f'[bold green]Recording started for [bold]{name}[/bold] in {where}[/bold green]')
+    if per_window:
+        console.print(f'[dim]Session ID: {sid or "pending port binding"}[/dim]')
+        console.print(f'[dim]Saves routed to backend: {selected_backend} (this window)[/dim]')
     if path:
-        console.print(f"[dim]Project-local hook installed: {path}[/dim]")
-    console.print("[dim]Memory saves/loads only in this directory, only for this agent.[/dim]")
+        console.print(f'[dim]Project-local hook installed: {path}[/dim]')
 
 
 def _project_hook_path(agent: str) -> Optional[Path]:
@@ -739,24 +828,81 @@ def _toggle_project_hook(agent: str, remove: bool) -> Optional[Path]:
     path = _project_hook_path(agent)
     if not path:
         return None
-    if agent == "codex":
-        from .codex import configure_hooks as _codex_configure
-        _codex_configure(path, remove=remove)
-    else:
-        from .hook import configure_hooks
-        configure_hooks(path, remove=remove)
+    from .codex import _session_lock
+    from .core import _SESSION_BACKEND_MAP_FILE
+
+    with _session_lock(_SESSION_BACKEND_MAP_FILE.with_suffix(".hooks.lock")):
+        if agent == "codex":
+            from .codex import configure_hooks as _codex_configure
+            _codex_configure(path, remove=remove)
+        else:
+            from .hook import configure_hooks
+            configure_hooks(path, remove=remove)
     return path
 
 
+def _status_backend_label(session_id: Optional[str] = None, agent: Optional[str] = None) -> str:
+    """Resolve the backend label for `memory status`.
+
+    Shows the per-session backend resolved through the ID, port, or marker, then the
+    MEMORY_BACKEND env var, then the sqlite default.
+    """
+    from .core import get_backend_for_session, get_recording_decision
+
+    sid, port = _resolve_window_identity(Path.cwd(), session_id, agent)
+    if agent == "claude" and not sid:
+        return "[yellow]unknown (use --session-id)[/yellow]"
+    if sid and get_recording_decision(sid) is None:
+        return "[dim]not selected (awaiting your choice)[/dim]"
+    window_backend = (
+        (get_backend_for_session(sid) if sid else None)
+        or (get_backend_for_session(port, table="ports") if port else None)
+    )
+    if window_backend:
+        return f"{window_backend} [dim](this window)[/dim]"
+    env_backend = os.environ.get("MEMORY_BACKEND")
+    if env_backend:
+        return f"{env_backend} [dim](from MEMORY_BACKEND)[/dim]"
+    return "sqlite [dim](default)[/dim]"
+
+
+def _status_recording_label(cwd, session_id: Optional[str] = None,
+                            agent: Optional[str] = None) -> Optional[str]:
+    """Resolve the recording label for `memory status`.
+
+    Session recording is authoritative when the ID, port, or marker resolves.
+    Other agents can use their existing directory recording settings.
+    """
+    from .core import recording_agents, recording_agents_for_session
+
+    sid, port = _resolve_window_identity(cwd, session_id, agent)
+    if sid or port:
+        window_agents = (
+            (recording_agents_for_session(sid) if sid else [])
+            or (recording_agents_for_session(port, table="ports") if port else [])
+        )
+        if window_agents:
+            return f"{', '.join(window_agents)} [dim](this window)[/dim]"
+        return None
+    # Claude is strictly session-scoped: a stale enabled.json entry for 'claude'
+    # must not be shown or acted upon — it cannot bind to any live window here.
+    dir_agents = [a for a in recording_agents(cwd) if a != "claude"]
+    if dir_agents:
+        return f"{', '.join(dir_agents)} [dim](this dir, legacy)[/dim]"
+    return None
+
+
 @cli.command()
-def status():
+@click.option("--session-id", default=None, help="Show settings for this Claude session ID.")
+def status(session_id):
     """Show what records here, the detected agent, its provider/model, and global state."""
-    from .core import recording_agents, is_stopped
+    from .core import is_stopped
     from .hook import detect_agent, resolve_provider_model, _provider_key_present
 
     cwd = Path.cwd()
-    detected = detect_agent()
-    agents_here = recording_agents(cwd)
+    detected = "claude" if session_id else detect_agent()
+    sid, port = _resolve_window_identity(cwd, session_id, detected)
+    recording_label = _status_recording_label(cwd, session_id, detected)
     provider, model = resolve_provider_model(detected, {})
     hook_path = _project_hook_path(detected)
     hook_installed = bool(hook_path and hook_path.exists()
@@ -764,9 +910,17 @@ def status():
 
     lines = [
         f"[bold]Project dir:[/bold]      {cwd}",
-        f"[bold]Recording agents:[/bold] {', '.join(agents_here) or '[dim]none (run memory start)[/dim]'}",
         f"[bold]Detected agent:[/bold]   {detected}",
     ]
+    if detected == "claude":
+        lines.append(f"[bold]Session ID:[/bold]       {sid or 'unresolved'}")
+    if detected == "claude" and not sid:
+        recording_label = "[yellow]unknown (use --session-id)[/yellow]"
+    elif detected == "claude":
+        from .core import get_recording_decision
+        if get_recording_decision(sid) is None:
+            recording_label = "[dim]off (awaiting your choice)[/dim]"
+    lines.append(f"[bold]Recording agents:[/bold] {recording_label or '[dim]none (run memory start)[/dim]'}")
     if provider:
         key_ok = "[green]key present[/green]" if _provider_key_present(provider) else "[red]no API key[/red]"
         lines.append(f"[bold]Resolved LLM:[/bold]     {provider} / {model or '(provider default)'}  ({key_ok})")
@@ -775,6 +929,12 @@ def status():
     lines.append(f"[bold]Project hook:[/bold]     "
                  + ("[green]installed[/green]" if hook_installed else "[dim]not installed[/dim]")
                  + (f" ({hook_path})" if hook_path else ""))
+    if recording_label:
+        lines.append(f"[bold]Save backend:[/bold]     " + _status_backend_label(session_id, detected))
+    else:
+        lines.append(f"[bold]Save backend:[/bold]     "
+                     + f"[dim]not attached until recording starts[/dim] "
+                     + f"[dim](would be: {_status_backend_label(session_id, detected)})[/dim]")
     lines.append(f"[bold]Global kill-switch:[/bold] "
                  + ("[red]ON — nothing records anywhere[/red]" if is_stopped() else "[green]off[/green]"))
 
@@ -784,7 +944,7 @@ def status():
 @cli.command()
 def config():
     """Show current configuration and how to set it up."""
-    backend = os.environ.get("MEMORY_BACKEND", "sqlite")
+    backend = os.environ.get("MEMORY_BACKEND") or "none (choose explicitly)"
     provider = os.environ.get("MEMORY_LLM_PROVIDER", "openai")
 
     console.print(Panel(
