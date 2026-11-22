@@ -156,15 +156,19 @@ def _write_json(path: Path, data: dict) -> None:
 
 # ── Hook command builder ──────────────────────────────────────────────────────
 
-def _hook_command() -> str:
-    """Return the shell command that runs the universal hook handler."""
+def _hook_command(*, shell: str = "bash") -> str:
+    """Quote the hook command for its runner, using Bash for Claude Code."""
     bootstrap = (
         "import sys; sys.path.insert(0, "
         + repr(str(Path(__file__).resolve().parent.parent))
         + "); from memory.hook import _run_hook; _run_hook()"
     )
-    args = [sys.executable, "-c", bootstrap]
-    return subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
+    if shell == "cmd":
+        return subprocess.list2cmdline([sys.executable, "-c", bootstrap])
+    python_exe = sys.executable
+    if os.name == "nt":
+        python_exe = python_exe.replace("\\", "/")
+    return shlex.join([python_exe, "-c", bootstrap])
 
 
 # ── Install / uninstall ───────────────────────────────────────────────────────
@@ -177,7 +181,8 @@ def configure_hooks(path: Path, remove: bool = False) -> None:
         events = {}
         config["hooks"] = events
 
-    command = _hook_command()
+    shell = "cmd" if os.name == "nt" and path.parent.name == ".copilot" else "bash"
+    command = _hook_command(shell=shell)
 
     for event in (_SESSION_START, *sorted(_SAVE_EVENTS), *sorted(_LINK_EVENTS)):
         groups: list = events.get(event, [])
