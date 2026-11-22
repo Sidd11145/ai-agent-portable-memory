@@ -2000,3 +2000,70 @@ def test_status_preserves_explicit_provider_and_model(current_session_save, monk
     assert result.exit_code == 0, result.output
     assert "openai / gpt-5" in result.output
 
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows paths are simulated on a POSIX filesystem.")
+@pytest.mark.parametrize("windows_executable", [
+    r"C:\Python314\python.exe",
+    r"C:\Program Files\Python's $Tools\python.exe",
+])
+def test_windows_hook_arguments_survive_bash_execution(tmp_path, monkeypatch, windows_executable):
+    import shlex
+    import shutil
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("Bash is required to test Claude's hook runner.")
+    real_python = sys.executable
+    executable = tmp_path / windows_executable.replace("\\", "/")
+    executable.parent.mkdir(parents=True)
+    recorder = tmp_path / "record_arguments.py"
+    recorder.write_text("import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+    executable.write_text(
+        "#!/bin/sh\nexec " + shlex.quote(real_python) + " "
+        + shlex.quote(str(recorder)) + ' "$@"\n')
+    executable.chmod(0o755)
+    project = tmp_path / "project's $files"
+    hook_file = project / "memory" / "hook.py"
+    hook_file.parent.mkdir(parents=True)
+    hook_file.touch()
+    monkeypatch.setattr(hook, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(hook.sys, "executable", windows_executable)
+    monkeypatch.setattr(hook, "__file__", str(hook_file))
+
+    result = subprocess.run([bash, "-c", hook._hook_command()], cwd=tmp_path,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    arguments = json.loads(result.stdout)
+    expected = (
+        "import sys; sys.path.insert(0, " + repr(str(project))
+        + "); from memory.hook import _run_hook; _run_hook()")
+    assert arguments == ["-c", expected]
+
+
+def test_generated_hook_runs_through_bash(tmp_path):
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("Bash is required to test Claude's hook runner.")
+    settings = tmp_path / ".claude" / "settings.json"
+    hook.configure_hooks(settings)
+    command = json.loads(settings.read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    result = subprocess.run([bash, "-c", command], input='{"hook_event_name":"Unknown"}',
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {}
+
+
+def test_marker_write_failure_is_reported(state, tmp_path, monkeypatch, capsys):
+    def write_marker(path, payload):
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(core, "_write_marker_file", write_marker)
+    core.write_session_marker("current-session", None, tmp_path)
+    assert "could not write session marker: Permission denied" in capsys.readouterr().err
+

@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -525,8 +526,8 @@ def write_session_marker(session_id: str, port: Optional[str], cwd: Path, *,
             process_path = _process_marker_path(claude_process)
             with _session_lock(process_path.with_suffix(".lock")):
                 _write_marker_file(process_path, payload)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"memory: could not write session marker: {exc}", file=sys.stderr)
 
 
 def read_session_marker_for_cwd(cwd: Path,
